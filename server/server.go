@@ -10,10 +10,14 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/0xERR0R/blocky/config"
+	"github.com/0xERR0R/blocky/configstore"
 	"github.com/0xERR0R/blocky/log"
+	"github.com/0xERR0R/blocky/logstream"
 	"github.com/0xERR0R/blocky/metrics"
 	"github.com/0xERR0R/blocky/model"
 	"github.com/0xERR0R/blocky/redis"
@@ -34,11 +38,23 @@ const (
 	certExpiryYears  = 5
 )
 
+// chainSnapshot holds a resolver chain for atomic swap.
+type chainSnapshot struct {
+	chain  resolver.ChainedResolver
+	cancel context.CancelFunc
+}
+
 // Server controls the endpoints for DNS and HTTP
 type Server struct {
-	dnsServers    []*dns.Server
-	queryResolver resolver.ChainedResolver
-	cfg           *config.Config
+	dnsServers  []*dns.Server
+	activeChain atomic.Pointer[chainSnapshot]
+	cfg         *config.Config
+	cfgMu       sync.RWMutex
+
+	configStore *configstore.ConfigStore
+	bootstrap   *resolver.Bootstrap
+	redisClient *redis.Client
+	broadcaster *logstream.Broadcaster
 
 	servers map[net.Listener]*httpServer
 }
@@ -101,7 +117,7 @@ func newTLSConfig(cfg *config.Config) (*tls.Config, error) {
 // NewServer creates new server instance with passed config
 //
 //nolint:funlen
-func NewServer(ctx context.Context, cfg *config.Config) (server *Server, err error) {
+func NewServer(ctx context.Context, cfg *config.Config, store *configstore.ConfigStore) (server *Server, err error) {
 	var tlsCfg *tls.Config
 
 	if len(cfg.Ports.HTTPS) > 0 || len(cfg.Ports.TLS) > 0 {
@@ -136,18 +152,30 @@ func NewServer(ctx context.Context, cfg *config.Config) (server *Server, err err
 		}
 	}
 
-	queryResolver, queryError := createQueryResolver(ctx, cfg, bootstrap, redisClient)
+	chainCtx, chainCancel := context.WithCancel(ctx)
+
+	queryResolver, queryError := createQueryResolver(chainCtx, cfg, bootstrap, redisClient)
 	if queryError != nil {
+		chainCancel()
+
 		return nil, queryError
 	}
 
+	broadcaster := logstream.NewBroadcaster(ctx, 1000)
+	log.Log().AddHook(logstream.NewHook(broadcaster))
+
 	server = &Server{
-		dnsServers:    dnsServers,
-		queryResolver: queryResolver,
-		cfg:           cfg,
+		dnsServers:  dnsServers,
+		cfg:         cfg,
+		configStore: store,
+		bootstrap:   bootstrap,
+		redisClient: redisClient,
+		broadcaster: broadcaster,
 
 		servers: make(map[net.Listener]*httpServer),
 	}
+
+	server.activeChain.Store(&chainSnapshot{chain: queryResolver, cancel: chainCancel})
 
 	server.printConfiguration()
 
@@ -158,11 +186,11 @@ func NewServer(ctx context.Context, cfg *config.Config) (server *Server, err err
 		return nil, fmt.Errorf("failed to create OpenAPI interface implementation: %w", err)
 	}
 
-	httpRouter := createHTTPRouter(cfg, openAPIImpl)
+	httpRouter := createHTTPRouter(cfg, openAPIImpl, server.configStore, server, server.broadcaster)
 	server.registerDoHEndpoints(httpRouter, cfg)
 
 	if len(cfg.Ports.HTTP) != 0 {
-		srv := newHTTPServer("http", httpRouter, cfg)
+		srv := newHTTPServer("http", httpRouter)
 
 		for _, l := range httpListeners {
 			server.servers[l] = srv
@@ -170,7 +198,7 @@ func NewServer(ctx context.Context, cfg *config.Config) (server *Server, err err
 	}
 
 	if len(cfg.Ports.HTTPS) != 0 {
-		srv := newHTTPServer("https", httpRouter, cfg)
+		srv := newHTTPServer("https", httpRouter)
 
 		for _, l := range httpsListeners {
 			server.servers[l] = srv
@@ -366,7 +394,7 @@ func (s *Server) printConfiguration() {
 		log.WithIndent(logger(), "  ", s.cfg.Redis.LogConfig)
 	}
 
-	resolver.ForEach(s.queryResolver, func(res resolver.Resolver) {
+	resolver.ForEach(s.activeChain.Load().chain, func(res resolver.Resolver) {
 		resolver.LogResolverConfig(res, logger())
 	})
 
@@ -429,11 +457,71 @@ func (s *Server) Start(ctx context.Context, errCh chan<- error) {
 func (s *Server) Stop(ctx context.Context) error {
 	logger().Info("Stopping server")
 
+	if s.broadcaster != nil {
+		s.broadcaster.Shutdown()
+	}
+
 	for _, server := range s.dnsServers {
 		if err := server.ShutdownContext(ctx); err != nil {
 			return fmt.Errorf("stop %s listener failed: %w", server.Net, err)
 		}
 	}
+
+	return nil
+}
+
+// Reconfigure rebuilds the resolver chain from current DB state.
+// On error, the old chain stays active.
+func (s *Server) Reconfigure(ctx context.Context) error {
+	if s.configStore == nil {
+		return fmt.Errorf("no config store configured")
+	}
+
+	// Snapshot config under read lock
+	s.cfgMu.RLock()
+	newCfg := *s.cfg
+	s.cfgMu.RUnlock()
+
+	// Build new config from DB
+	blocking, err := s.configStore.BuildBlockingConfig(newCfg.Blocking)
+	if err != nil {
+		return fmt.Errorf("building blocking config: %w", err)
+	}
+
+	customDNS, err := s.configStore.BuildCustomDNSConfig(newCfg.CustomDNS)
+	if err != nil {
+		return fmt.Errorf("building custom DNS config: %w", err)
+	}
+
+	newCfg.Blocking = blocking
+	newCfg.CustomDNS = customDNS
+
+	// Build new resolver chain (slow — list loading, network I/O)
+	chainCtx, chainCancel := context.WithCancel(ctx)
+
+	newChain, err := createQueryResolver(chainCtx, &newCfg, s.bootstrap, s.redisClient)
+	if err != nil {
+		chainCancel()
+
+		return fmt.Errorf("creating resolver chain: %w", err)
+	}
+
+	// Atomic swap — only on success
+	snap := &chainSnapshot{chain: newChain, cancel: chainCancel}
+	old := s.activeChain.Swap(snap)
+
+	// Update stored config
+	s.cfgMu.Lock()
+	s.cfg.Blocking = blocking
+	s.cfg.CustomDNS = customDNS
+	s.cfgMu.Unlock()
+
+	// Cancel old chain context (in-flight queries drain naturally)
+	if old != nil && old.cancel != nil {
+		old.cancel()
+	}
+
+	logger().Info("Configuration reloaded successfully")
 
 	return nil
 }
@@ -556,7 +644,7 @@ func (s *Server) resolve(ctx context.Context, request *model.Request) (response 
 	default:
 		var err error
 
-		response, err = s.queryResolver.Resolve(ctx, request)
+		response, err = s.activeChain.Load().chain.Resolve(ctx, request)
 		if err != nil {
 			var upstreamErr *resolver.UpstreamServerError
 

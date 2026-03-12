@@ -165,7 +165,7 @@ var _ = BeforeSuite(func() {
 	}
 
 	// create server
-	sut, err = NewServer(ctx, cfg)
+	sut, err = NewServer(ctx, cfg, nil)
 	Expect(err).Should(Succeed())
 
 	errChan := make(chan error, 10)
@@ -190,7 +190,7 @@ var _ = Describe("Running DNS server", func() {
 		BeforeEach(func() {
 			mockClientName.Store("")
 			// reset client cache
-			clientNamesResolver, err := resolver.GetFromChainWithType[*resolver.ClientNamesResolver](sut.queryResolver)
+			clientNamesResolver, err := resolver.GetFromChainWithType[*resolver.ClientNamesResolver](sut.activeChain.Load().chain)
 			Expect(err).Should(Succeed())
 
 			clientNamesResolver.FlushCache()
@@ -557,9 +557,9 @@ var _ = Describe("Running DNS server", func() {
 			})
 			When("Internal error occurs", func() {
 				BeforeEach(func() {
-					bak := sut.queryResolver
-					sut.queryResolver = nil // trigger a panic
-					DeferCleanup(func() { sut.queryResolver = bak })
+					bak := sut.activeChain.Load()
+					sut.activeChain.Store(nil) // trigger a panic
+					DeferCleanup(func() { sut.activeChain.Store(bak) })
 				})
 
 				It("should return 'ServFail'", func() {
@@ -603,14 +603,14 @@ var _ = Describe("Running DNS server", func() {
 		})
 		When("Server is created", func() {
 			It("is created without redis connection", func() {
-				_, err = NewServer(ctx, &cfg)
+				_, err = NewServer(ctx, &cfg, nil)
 
 				Expect(err).Should(Succeed())
 			})
 			It("can't be created if redis server is unavailable", func() {
 				cfg.Redis.Required = true
 
-				_, err = NewServer(ctx, &cfg)
+				_, err = NewServer(ctx, &cfg, nil)
 
 				Expect(err).Should(HaveOccurred())
 			})
@@ -642,7 +642,7 @@ var _ = Describe("Running DNS server", func() {
 						DNS:     config.ListenConfig{GetHostPort("127.0.0.1", dnsBasePort2)},
 						DOHPath: "/dns-query",
 					},
-				})
+				}, nil)
 
 				Expect(err).Should(Succeed())
 
@@ -687,7 +687,7 @@ var _ = Describe("Running DNS server", func() {
 						DNS:     config.ListenConfig{GetHostPort("127.0.0.1", dnsBasePort2)},
 						DOHPath: "/dns-query",
 					},
-				})
+				}, nil)
 
 				Expect(err).Should(Succeed())
 

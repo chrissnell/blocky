@@ -1,10 +1,19 @@
-.PHONY: all clean generate build test e2e-test e2e-test-coverage lint run fmt docker-build help check-tools
+.PHONY: all clean generate build test e2e-test e2e-test-coverage lint run fmt docker-build docker-push bump-minor bump-point deploy version help check-tools
 .DEFAULT_GOAL:=help
 
-VERSION?=$(shell git describe --always --tags)
-BUILD_TIME?=$(shell date --iso-8601=seconds)
+VERSION:=$(shell cat VERSION)
+BUILD_TIME?=$(shell date -u '+%Y-%m-%dT%H:%M:%S%z')
 DOC_PATH?="main"
-DOCKER_IMAGE_NAME=spx01/blocky
+
+DOCKER_REGISTRY?=ghcr.io/chrissnell
+DOCKER_TAG:=v$(VERSION)
+GIT_REMOTE:=chrissnell
+
+# Helm config
+HELM_CHART:=packaging/helm/blocky
+HELM_RELEASE:=blocky
+HELM_NAMESPACE:=blocky
+HELM_VALUES:=/Users/cjs/kube/apps/blocky/values.yaml
 
 BINARY_NAME:=blocky
 BIN_OUT_DIR?=bin
@@ -17,7 +26,7 @@ GO_BUILD_LD_FLAGS:=\
 	-w \
 	-s \
 	-X github.com/0xERR0R/blocky/util.Version=${VERSION} \
-	-X github.com/0xERR0R/blocky/util.BuildTime=$(shell date -d "${BUILD_TIME}" '+%Y%m%d-%H%M%S') \
+	-X github.com/0xERR0R/blocky/util.BuildTime=$(shell date -j -f '%Y-%m-%dT%H:%M:%S%z' "${BUILD_TIME}" '+%Y%m%d-%H%M%S' 2>/dev/null || date -d "${BUILD_TIME}" '+%Y%m%d-%H%M%S' 2>/dev/null || echo "${BUILD_TIME}") \
 	-X github.com/0xERR0R/blocky/util.Architecture=${GOARCH}${GOARM}
 
 GO_BUILD_OUTPUT:=$(BIN_OUT_DIR)/$(BINARY_NAME)$(BINARY_SUFFIX)
@@ -151,16 +160,49 @@ fmt: check-go ## gofmt and goimports all go files
 	go tool gofumpt -l -w -extra .
 	find . -name '*.go' -exec go tool goimports -w {} +
 
-docker-build: check-docker generate ## Build docker image
-	docker buildx build \
-		--build-arg VERSION=${VERSION} \
+docker-build: check-docker ## Build docker image tagged with VERSION
+	docker build \
+		--platform linux/amd64 \
+		--build-arg VERSION=$(DOCKER_TAG) \
 		--build-arg BUILD_TIME=${BUILD_TIME} \
-		--build-arg GOPROXY \
-		--build-arg DOC_PATH=${DOC_PATH} \
-		--network=host \
-		-o type=docker \
-		-t ${DOCKER_IMAGE_NAME} \
+		-t $(DOCKER_REGISTRY)/blocky:$(DOCKER_TAG) \
+		-t $(DOCKER_REGISTRY)/blocky:latest \
 		.
+
+docker-push: docker-build ## Build and push docker image to ghcr.io
+	docker push $(DOCKER_REGISTRY)/blocky:$(DOCKER_TAG)
+	docker push $(DOCKER_REGISTRY)/blocky:latest
+	@echo "Pushed $(DOCKER_REGISTRY)/blocky:$(DOCKER_TAG)"
+
+version: ## Show current version
+	@echo $(DOCKER_TAG)
+
+bump-minor: ## Bump minor version, commit, tag, and push
+	@echo "Current version: $(VERSION)"
+	$(eval NEW_VERSION := $(shell echo $(VERSION) | awk -F. '{printf "%d.%d.0", $$1, $$2+1}'))
+	@echo "$(NEW_VERSION)" > VERSION
+	@echo "New version: $(NEW_VERSION)"
+	git add VERSION
+	git commit -m "Bump version to v$(NEW_VERSION)"
+	git tag "v$(NEW_VERSION)"
+	git push $(GIT_REMOTE) && git push $(GIT_REMOTE) "v$(NEW_VERSION)"
+
+bump-point: ## Bump point version, commit, tag, and push
+	@echo "Current version: $(VERSION)"
+	$(eval NEW_VERSION := $(shell echo $(VERSION) | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3+1}'))
+	@echo "$(NEW_VERSION)" > VERSION
+	@echo "New version: $(NEW_VERSION)"
+	git add VERSION
+	git commit -m "Bump version to v$(NEW_VERSION)"
+	git tag "v$(NEW_VERSION)"
+	git push $(GIT_REMOTE) && git push $(GIT_REMOTE) "v$(NEW_VERSION)"
+
+deploy: docker-push ## Build, push, and deploy to Kubernetes via Helm
+	helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
+		-n $(HELM_NAMESPACE) \
+		-f $(HELM_VALUES) \
+		--set image.tag=$(DOCKER_TAG)
+	@echo "Deployed $(DOCKER_REGISTRY)/blocky:$(DOCKER_TAG)"
 
 check-tools: check-go check-docker ## Check if all required tools are installed
 
