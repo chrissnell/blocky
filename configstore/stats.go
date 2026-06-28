@@ -29,17 +29,19 @@ func (s *ConfigStore) SaveStats(snap *statscollector.StatsSnapshot) error {
 			}
 
 			bucketRows = append(bucketRows, StatsBucket{
-				Timestamp:    b.Timestamp.Unix(),
-				Total:        b.Total,
-				Blocked:      b.Blocked,
-				ClientCounts: string(cc),
+				Timestamp:     b.Timestamp.Unix(),
+				Total:         b.Total,
+				Blocked:       b.Blocked,
+				ClientCounts:  string(cc),
+				LatencySum:    int64(b.LatencySum),
+				UpstreamCount: b.UpstreamCount,
 			})
 		}
 
 		if len(bucketRows) > 0 {
 			if err := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "timestamp"}},
-				DoUpdates: clause.AssignmentColumns([]string{"total", "blocked", "client_counts"}),
+				DoUpdates: clause.AssignmentColumns([]string{"total", "blocked", "client_counts", "latency_sum", "upstream_count"}),
 			}).CreateInBatches(&bucketRows, 50).Error; err != nil {
 				return fmt.Errorf("upsert stats buckets: %w", err)
 			}
@@ -113,9 +115,11 @@ func (s *ConfigStore) LoadStats() (*statscollector.StatsSnapshot, error) {
 
 	for _, row := range bucketRows {
 		b := statscollector.BucketSnapshot{
-			Timestamp: time.Unix(row.Timestamp, 0),
-			Total:     row.Total,
-			Blocked:   row.Blocked,
+			Timestamp:     time.Unix(row.Timestamp, 0),
+			Total:         row.Total,
+			Blocked:       row.Blocked,
+			LatencySum:    time.Duration(row.LatencySum),
+			UpstreamCount: row.UpstreamCount,
 		}
 
 		if row.ClientCounts != "" && row.ClientCounts != "{}" {

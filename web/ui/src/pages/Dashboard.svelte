@@ -10,6 +10,7 @@
     getStats,
     getStatsOvertime,
     getStatsOvertimeClients,
+    getStatsOvertimeLatency,
     getStatsQueryTypes,
     getStatsResponseTypes,
     getStatsTopDomains,
@@ -19,6 +20,7 @@
   let stats = $state(null)
   let overtime = $state(null)
   let overtimeClients = $state(null)
+  let overtimeLatency = $state(null)
   let queryTypes = $state(null)
   let responseTypes = $state(null)
   let topDomains = $state(null)
@@ -82,6 +84,22 @@
       }))
   })
 
+  // Upstream latency bar chart
+  let latencyLabels = $derived(
+    overtimeLatency?.buckets?.map(b => fmtTime(b.ts)) ?? []
+  )
+
+  let latencyDatasets = $derived(() => {
+    if (!overtimeLatency?.buckets) return []
+    return [
+      {
+        label: 'Avg latency (ms)',
+        data: overtimeLatency.buckets.map(b => Math.round((b.avg_latency_ms ?? 0) * 10) / 10),
+        color: getCssVar('--color-info'),
+      },
+    ]
+  })
+
   // Doughnut charts
   let qtLabels = $derived(queryTypes ? Object.keys(queryTypes) : [])
   let qtData = $derived(queryTypes ? Object.values(queryTypes) : [])
@@ -120,6 +138,7 @@
       getStats(),
       getStatsOvertime(),
       getStatsOvertimeClients(),
+      getStatsOvertimeLatency(),
       getStatsQueryTypes(),
       getStatsResponseTypes(),
       getStatsTopDomains(),
@@ -128,10 +147,11 @@
     if (results[0].status === 'fulfilled' && results[0].value) stats = results[0].value
     if (results[1].status === 'fulfilled' && results[1].value) overtime = results[1].value
     if (results[2].status === 'fulfilled' && results[2].value) overtimeClients = results[2].value
-    if (results[3].status === 'fulfilled' && results[3].value) queryTypes = results[3].value
-    if (results[4].status === 'fulfilled' && results[4].value) responseTypes = results[4].value
-    if (results[5].status === 'fulfilled' && results[5].value) topDomains = results[5].value
-    if (results[6].status === 'fulfilled' && results[6].value) topClients = results[6].value
+    if (results[3].status === 'fulfilled' && results[3].value) overtimeLatency = results[3].value
+    if (results[4].status === 'fulfilled' && results[4].value) queryTypes = results[4].value
+    if (results[5].status === 'fulfilled' && results[5].value) responseTypes = results[5].value
+    if (results[6].status === 'fulfilled' && results[6].value) topDomains = results[6].value
+    if (results[7].status === 'fulfilled' && results[7].value) topClients = results[7].value
     loaded = true
   }
 
@@ -162,6 +182,11 @@
     <!-- Client Activity -->
     <Box title="Client activity over last 24 hours">
       <BarChart labels={clientLabels} datasets={clientDatasets()} stacked={true} />
+    </Box>
+
+    <!-- Upstream Latency -->
+    <Box title="Upstream latency over last 24 hours">
+      <BarChart labels={latencyLabels} datasets={latencyDatasets()} stacked={true} />
     </Box>
 
     <!-- Doughnut Charts -->

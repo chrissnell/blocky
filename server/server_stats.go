@@ -87,6 +87,13 @@ func handleStatsOvertimeClients(c *statscollector.Collector) http.HandlerFunc {
 	}
 }
 
+func handleStatsOvertimeLatency(c *statscollector.Collector) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"buckets": c.OverTime()})
+	}
+}
+
 func handleStatsQueryTypes(c *statscollector.Collector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

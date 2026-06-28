@@ -78,12 +78,16 @@ func (r *MetricsResolver) Resolve(ctx context.Context, request *model.Request) (
 			client = strings.Join(request.ClientNames, ",")
 		}
 
+		upstream := response.RType == model.ResponseTypeRESOLVED
+
 		r.StatsCollector.Record(statscollector.QueryRecord{
 			Timestamp:    request.RequestTS,
 			Client:       client,
 			Domain:       strings.ToLower(domain),
 			QueryType:    dns.TypeToString[request.Req.Question[0].Qtype],
 			ResponseType: response.RType.String(),
+			Upstream:     upstream,
+			Latency:      time.Since(request.RequestTS),
 		})
 	}
 

@@ -179,6 +179,40 @@ func TestBucketAdvancement(t *testing.T) {
 	}
 }
 
+func TestUpstreamLatencyAverage(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := New(WithClock(func() time.Time { return now }))
+
+	// Two upstream queries (20ms + 40ms) average to 30ms.
+	c.Record(QueryRecord{Client: "c", Domain: "a.com", QueryType: "A", ResponseType: "RESOLVED", Upstream: true, Latency: 20 * time.Millisecond})
+	c.Record(QueryRecord{Client: "c", Domain: "b.com", QueryType: "A", ResponseType: "RESOLVED", Upstream: true, Latency: 40 * time.Millisecond})
+	// Non-upstream queries must not affect the average.
+	c.Record(QueryRecord{Client: "c", Domain: "ads.com", QueryType: "A", ResponseType: "BLOCKED", Upstream: false, Latency: 5 * time.Second})
+	c.Record(QueryRecord{Client: "c", Domain: "cached.com", QueryType: "A", ResponseType: "CACHED", Upstream: false})
+
+	var got float64
+	for _, b := range c.OverTime() {
+		if b.UpstreamCount > 0 {
+			got = b.AvgLatencyMs
+		}
+	}
+
+	if got != 30 {
+		t.Errorf("avg latency = %.1fms, want 30ms", got)
+	}
+}
+
+func TestUpstreamLatencyEmptyBucket(t *testing.T) {
+	c := New()
+	c.Record(QueryRecord{Client: "c", Domain: "ads.com", QueryType: "A", ResponseType: "BLOCKED", Upstream: false})
+
+	for _, b := range c.OverTime() {
+		if b.AvgLatencyMs != 0 {
+			t.Errorf("avg latency = %.1f, want 0 when no upstream queries", b.AvgLatencyMs)
+		}
+	}
+}
+
 func TestBucketWraparound(t *testing.T) {
 	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := baseTime

@@ -247,6 +247,10 @@ export async function getStatsOvertimeClients() {
   return rawGet('/api/stats/overtime/clients', null)
 }
 
+export async function getStatsOvertimeLatency() {
+  return rawGet('/api/stats/overtime/latency', null)
+}
+
 export async function getStatsQueryTypes() {
   return rawGet('/api/stats/query-types', null)
 }
