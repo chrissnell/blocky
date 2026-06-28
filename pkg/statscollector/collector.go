@@ -22,6 +22,11 @@ type QueryRecord struct {
 	Domain       string // question domain (lowercase, no trailing dot)
 	QueryType    string // A, AAAA, SRV, MX, etc.
 	ResponseType string // RESOLVED, CACHED, BLOCKED, CUSTOMDNS, etc.
+
+	// Upstream is true when the query was resolved by an upstream resolver,
+	// in which case Latency carries the resolution duration.
+	Upstream bool
+	Latency  time.Duration
 }
 
 // TimeBucket holds aggregated counts for one 10-minute window.
@@ -30,6 +35,12 @@ type TimeBucket struct {
 	Total        int            `json:"total"`
 	Blocked      int            `json:"blocked"`
 	ClientCounts map[string]int `json:"clients,omitempty"`
+
+	// Upstream latency accumulation. LatencySum and UpstreamCount are internal;
+	// AvgLatencyMs is the per-bucket average exposed to API consumers.
+	LatencySum    time.Duration `json:"-"`
+	UpstreamCount int           `json:"-"`
+	AvgLatencyMs  float64       `json:"avg_latency_ms"`
 }
 
 // DomainCount is a domain name with its hit count.
@@ -59,10 +70,12 @@ type StatsSnapshot struct {
 
 // BucketSnapshot is a single time bucket for persistence.
 type BucketSnapshot struct {
-	Timestamp    time.Time
-	Total        int
-	Blocked      int
-	ClientCounts map[string]int
+	Timestamp     time.Time
+	Total         int
+	Blocked       int
+	ClientCounts  map[string]int
+	LatencySum    time.Duration
+	UpstreamCount int
 }
 
 // Collector accumulates query stats in memory using a ring buffer.
@@ -79,8 +92,8 @@ type Collector struct {
 	queryTypes      map[string]int
 	responseTypes   map[string]int
 
-	dirty        bool // set on Record(), cleared after snapshot
-	flushCount   int  // counts flushes for periodic counter pruning
+	dirty          bool // set on Record(), cleared after snapshot
+	flushCount     int  // counts flushes for periodic counter pruning
 	maxCounterKeys int
 
 	// Allow injecting time for testing
@@ -234,9 +247,11 @@ func (c *Collector) snapshot() *StatsSnapshot {
 		}
 
 		bs := BucketSnapshot{
-			Timestamp: b.Timestamp,
-			Total:     b.Total,
-			Blocked:   b.Blocked,
+			Timestamp:     b.Timestamp,
+			Total:         b.Total,
+			Blocked:       b.Blocked,
+			LatencySum:    b.LatencySum,
+			UpstreamCount: b.UpstreamCount,
 		}
 
 		if b.ClientCounts != nil {
@@ -282,10 +297,12 @@ func (c *Collector) loadFromStore() {
 
 		idx := (c.head - offset + BucketCount) % BucketCount
 		c.buckets[idx] = TimeBucket{
-			Timestamp:    ts,
-			Total:        bs.Total,
-			Blocked:      bs.Blocked,
-			ClientCounts: bs.ClientCounts,
+			Timestamp:     ts,
+			Total:         bs.Total,
+			Blocked:       bs.Blocked,
+			ClientCounts:  bs.ClientCounts,
+			LatencySum:    bs.LatencySum,
+			UpstreamCount: bs.UpstreamCount,
 		}
 
 		if c.buckets[idx].ClientCounts == nil {
@@ -339,6 +356,11 @@ func (c *Collector) Record(q QueryRecord) {
 	}
 
 	b.ClientCounts[q.Client]++
+
+	if q.Upstream {
+		b.LatencySum += q.Latency
+		b.UpstreamCount++
+	}
 
 	if q.ResponseType == "BLOCKED" {
 		c.domainBlocked[q.Domain]++
@@ -431,6 +453,12 @@ func (c *Collector) OverTime() []TimeBucket {
 	for i := range BucketCount {
 		idx := (c.head + 1 + i) % BucketCount
 		out[i] = c.buckets[idx]
+
+		// Average upstream latency for the bucket, in milliseconds.
+		if c.buckets[idx].UpstreamCount > 0 {
+			avg := c.buckets[idx].LatencySum / time.Duration(c.buckets[idx].UpstreamCount)
+			out[i].AvgLatencyMs = float64(avg) / float64(time.Millisecond)
+		}
 
 		// Deep-copy the client map
 		if c.buckets[idx].ClientCounts != nil {

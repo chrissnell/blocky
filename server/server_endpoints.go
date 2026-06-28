@@ -317,6 +317,7 @@ func registerUIRoutes(router *chi.Mux, cfg *config.Config,
 			r.Get("/api/stats", handleStats)
 			r.Get("/api/stats/overtime", handleStatsOvertime(statsCollector))
 			r.Get("/api/stats/overtime/clients", handleStatsOvertimeClients(statsCollector))
+			r.Get("/api/stats/overtime/latency", handleStatsOvertimeLatency(statsCollector))
 			r.Get("/api/stats/query-types", handleStatsQueryTypes(statsCollector))
 			r.Get("/api/stats/response-types", handleStatsResponseTypes(statsCollector))
 			r.Get("/api/stats/top-domains", handleStatsTopDomains(statsCollector))

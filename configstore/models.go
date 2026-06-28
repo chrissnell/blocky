@@ -169,10 +169,12 @@ type (
 
 // StatsBucket stores a single 10-minute aggregation window.
 type StatsBucket struct {
-	Timestamp    int64  `gorm:"primaryKey"` // Unix seconds, truncated to 10min
-	Total        int    `gorm:"not null;default:0"`
-	Blocked      int    `gorm:"not null;default:0"`
-	ClientCounts string `gorm:"type:text;not null;default:'{}'"` // JSON map[string]int
+	Timestamp     int64  `gorm:"primaryKey"` // Unix seconds, truncated to 10min
+	Total         int    `gorm:"not null;default:0"`
+	Blocked       int    `gorm:"not null;default:0"`
+	ClientCounts  string `gorm:"type:text;not null;default:'{}'"` // JSON map[string]int
+	LatencySum    int64  `gorm:"not null;default:0"`              // sum of upstream latencies, nanoseconds
+	UpstreamCount int    `gorm:"not null;default:0"`              // number of upstream-resolved queries
 }
 
 func (StatsBucket) TableName() string { return "stats_buckets" }
